@@ -1,4 +1,5 @@
 #%%
+from sys import displayhook
 import numpy as np
 import pandas as pd
 import re
@@ -210,3 +211,102 @@ print(df_submit.shape)
 display(df_submit.head())
 
 df_submit.to_csv('../output/submission_baseline.csv', index=None)
+
+#%%
+display(application_train["DAYS_EMPLOYED"].value_counts())
+print ('% of positive values: {:.0%}'.format((application_train["DAYS_EMPLOYED"]>0).mean()))
+print ('# of positive values: {}'.format((application_train["DAYS_EMPLOYED"]>0).sum()))
+
+#%%
+application_train["DAYS_EMPLOYED"] = application_train["DAYS_EMPLOYED"].replace(365243, np.nan)
+display(application_train["DAYS_EMPLOYED"].value_counts())
+print ('% of positive values: {:.0%}'.format((application_train["DAYS_EMPLOYED"]>0).mean()))
+print ('# of positive values: {}'.format((application_train["DAYS_EMPLOYED"]>0).sum()))
+
+#%%
+## FV1
+application_train['income_per_person'] = application_train['AMT_INCOME_TOTAL'] / application_train['CNT_FAM_MEMBERS']
+
+## FV2
+application_train['income_per_employed'] = application_train['AMT_INCOME_TOTAL'] / application_train['DAYS_EMPLOYED']
+
+## FV3
+application_train['ext_source_mean'] = application_train[['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']].mean(axis=1)
+application_train['ext_source_max'] = application_train[['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']].max(axis=1)
+application_train['ext_source_min'] = application_train[['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']].min(axis=1)
+application_train['ext_source_std'] = application_train[['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']].std(axis=1)
+application_train['ext_source_count'] = application_train[['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']].notnull().sum(axis=1)
+
+## FV4
+application_train['days_employed_per_birth'] = application_train['DAYS_EMPLOYED'] / application_train['DAYS_BIRTH']
+
+## FV5
+application_train['annuity_per_income'] = application_train['AMT_ANNUITY'] / application_train['AMT_INCOME_TOTAL']
+
+## FV6
+application_train['annuity_per_credit'] = application_train['AMT_ANNUITY'] / application_train['AMT_CREDIT']
+
+#%%
+def make_training_dataset(application_train):
+    x_train = application_train.drop(columns=['TARGET', 'SK_ID_CURR'])
+    y_train = application_train['TARGET']
+    id_train = application_train['SK_ID_CURR']
+
+    for col in x_train.columns:
+        if x_train[col].dtype == 'O':
+            x_train[col] = x_train[col].astype('category')
+
+    return x_train, y_train, id_train
+
+def make_test_dataset(application_test):
+    x_test = application_test.drop(columns=['SK_ID_CURR'])
+    id_test = application_test['SK_ID_CURR']
+
+    for col in x_test.columns:
+        if x_test[col].dtype == 'O':
+            x_test[col] = x_test[col].astype('category')
+
+    return x_test, id_test
+
+#%%
+x_train, y_train, id_train = make_training_dataset(application_train)
+
+train_oof, imp, metrics = train_lgb(
+    x_train, y_train, id_train, params, list_nfold=[0,1,2,3,4], n_splits=5
+)
+
+#%%
+imp.sort_values('imp', ascending=False)[:10]
+
+#%%
+application_test["DAYS_EMPLOYED"] = application_test["DAYS_EMPLOYED"].replace(365243, np.nan)
+
+## FV1
+application_test['income_per_person'] = application_test['AMT_INCOME_TOTAL'] / application_test['CNT_FAM_MEMBERS']
+
+## FV2
+application_test['income_per_employed'] = application_test['AMT_INCOME_TOTAL'] / application_test['DAYS_EMPLOYED']
+
+## FV3
+application_test['ext_source_mean'] = application_test[['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']].mean(axis=1)
+application_test['ext_source_max'] = application_test[['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']].max(axis=1)
+application_test['ext_source_min'] = application_test[['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']].min(axis=1)
+application_test['ext_source_std'] = application_test[['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']].std(axis=1)
+application_test['ext_source_count'] = application_test[['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']].notnull().sum(axis=1)
+
+## FV4
+application_test['days_employed_per_birth'] = application_test['DAYS_EMPLOYED'] / application_test['DAYS_BIRTH']
+
+## FV5
+application_test['annuity_per_income'] = application_test['AMT_ANNUITY'] / application_test['AMT_INCOME_TOTAL']
+
+## FV6
+application_test['annuity_per_credit'] = application_test['AMT_ANNUITY'] / application_test['AMT_CREDIT']
+
+#%%
+x_test, id_test = make_test_dataset(application_test)
+test_pred = predict_lgb(x_test, id_test)
+df_submit = test_pred.rename(columns={'pred': 'TARGET'})
+print(df_submit.shape)
+display(df_submit.head())
+df_submit.to_csv('../output/submission_FeatureEngineering.csv', index=None)

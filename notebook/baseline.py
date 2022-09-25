@@ -87,16 +87,6 @@ print ('index(train): ', cv[0][0])
 print ('index(valid): ', cv[0][1])
 
 #%%
-nfold = 0
-idx_tr, idx_va = cv[nfold][0], cv[nfold][1]
-print (idx_tr)
-x_tr, y_tr = x_train.loc[idx_tr, :], y_train.loc[idx_tr, :]
-#x_tr, y_tr, id_tr = x_train.loc[idx_tr, :], y_train.loc[idx_tr, :], id_train.loc[idx_tr, :]
-#x_va, y_va, id_va = x_train.loc[idx_va, :], y_train.loc[idx_va, :], id_train.loc[idx_va, :]
-#print (x_tr.shape, x_va.shape)
-
-
-#%%
 def train_lgb(input_x, input_y, input_id, params, list_nfold=[0,1,2,3,4], n_splits=5):
     train_oof = np.zeros(len(input_x))
     metrics = []
@@ -310,3 +300,145 @@ df_submit = test_pred.rename(columns={'pred': 'TARGET'})
 print(df_submit.shape)
 display(df_submit.head())
 df_submit.to_csv('../output/submission_FeatureEngineering.csv', index=None)
+
+#%%
+pos = pd.read_csv('../input/POS_CASH_balance.csv')
+pos = reduce_mem_usage(pos)
+print (pos.shape)
+pos.head()
+
+#%%
+pos_ohe = pd.get_dummies(pos, columns=['NAME_CONTRACT_STATUS'], dummy_na=True)
+col_ohe = sorted(list(set(pos_ohe.columns) - set(pos.columns)))
+print(len(col_ohe))
+display(col_ohe)
+
+#%%
+pos_ohe_agg = pos_ohe.groupby('SK_ID_CURR').agg({
+    'MONTHS_BALANCE': ['mean', 'std', 'min', 'max'],
+    'CNT_INSTALMENT': ['mean', 'std', 'min', 'max'],
+    'CNT_INSTALMENT_FUTURE': ['mean', 'std', 'min', 'max'],
+    'SK_DPD': ['mean', 'std', 'min', 'max'],
+    'SK_DPD_DEF': ['mean', 'std', 'min', 'max'],
+    'NAME_CONTRACT_STATUS_Active': ['mean'],
+    'NAME_CONTRACT_STATUS_Amortized debt': ['mean'],
+    'NAME_CONTRACT_STATUS_Approved': ['mean'],
+    'NAME_CONTRACT_STATUS_Canceled': ['mean'],
+    'NAME_CONTRACT_STATUS_Completed': ['mean'],
+    'NAME_CONTRACT_STATUS_Demand': ['mean'],
+    'NAME_CONTRACT_STATUS_Returned to the store': ['mean'],
+    'NAME_CONTRACT_STATUS_Signed': ['mean'],
+    'NAME_CONTRACT_STATUS_XNA': ['mean'],
+    'NAME_CONTRACT_STATUS_nan': ['mean'],
+    'SK_ID_PREV': ['count', 'nunique']
+})
+
+pos_ohe_agg.columns = [i + '_' + j for i,j in pos_ohe_agg.columns]
+pos_ohe_agg = pos_ohe_agg.reset_index(drop=False)
+
+print (pos_ohe_agg.shape)
+display(pos_ohe_agg.head())
+
+#%%
+df_train = pd.merge(application_train, pos_ohe_agg, on='SK_ID_CURR', how='left')
+print(df_train.shape)
+df_train.head()
+
+#%%
+x_train, y_train, id_train = make_training_dataset(df_train)
+train_oof, imp, metrics = train_lgb(
+    x_train, y_train, id_train, params, list_nfold=[0,1,2,3,4],n_splits=5
+)
+
+#%%
+imp.sort_values('imp', ascending=False)[:10]
+
+#%%
+df_test = pd.merge(application_test, pos_ohe_agg, on='SK_ID_CURR', how='left')
+x_test, id_test = make_test_dataset(df_test)
+
+test_pred = predict_lgb(
+    x_test, id_test
+)
+
+#%%
+df_submit = test_pred.rename(columns={'pred': 'TARGET'})
+print(df_submit.shape)
+display(df_submit.head())
+df_submit.to_csv('../output/submission_FeatureEngineering2.csv', index=None)
+
+#%%
+import optuna
+
+x_train, y_train, id_train = make_training_dataset(df_train)
+params_base = {
+    'boosting_type': 'gbdt',
+    'objective': 'binary',
+    'metric': 'auc',
+    'verbosity': -1, 
+    'learning_rate': 0.05,
+    'n_estimators': 100000,
+    'bagging_freq': 1
+}
+
+def objective(trial):
+    params_tuning = {
+        'num_leaves': trial.suggest_int('num_leaves', 8, 256),
+        'min_child_samples': trial.suggest_int('min_child_samples', 5, 200),
+        'min_sum_hessian_in_leaf': trial.suggest_float('min_sum_hessian_in_leaf', 1e-5, 1e-2, log=True),
+        'feature_fraction': trial.suggest_float('feature_fraction', 0.5, 1.0),
+        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.5, 1.0),
+        'lambda_l1': trial.suggest_float('lambda_l1', 1e-2, 1e+2, log=True),
+        'lambda_l2': trial.suggest_float('lambda_l2', 1e-2, 1e+2, log=True),
+    }
+    params_tuning.update(params_base)
+
+    list_metrics = []
+    cv = list(StratifiedKFold(n_splits=5,shuffle=True,random_state=123).split(x_train, y_train))
+    list_fold = [0]
+    for nfold in list_fold:
+        idx_tr, idx_va = cv[nfold][0], cv[nfold][1]
+        x_tr, y_tr = x_train.loc[idx_tr, :], y_train.loc[idx_tr]
+        x_va, y_va = x_train.loc[idx_va, :], y_train.loc[idx_va]
+        model = lgb.LGBMClassifier(**params)
+        model.fit(
+            x_tr, y_tr, eval_set=[(x_tr, y_tr), (x_va, y_va)],
+            early_stopping_rounds=100, verbose=0
+        )
+        y_va_pred = model.predict_proba(x_va)[:, 1]
+        metric_va = roc_auc_score(y_va, y_va_pred)
+        list_metrics.append(metric_va)
+    
+    metrics = np.mean(list_metrics)
+
+    return metrics
+
+#%%
+sampler = optuna.samplers.TPESampler(seed=123)
+study = optuna.create_study(sampler=sampler, direction='maximize')
+study.optimize(objective, n_trials=50, n_jobs=5)
+
+#%%
+trial = study.best_trial
+print ('auc(best) = {:.4f}'.format(trial.value))
+display(trial.params)
+
+params_best = trial.params
+params_best.update(params_base)
+display(params_best)
+
+#%%
+train_oof, imp, metrics = train_lgb(
+    x_train, y_train, id_train, params=params_best
+)
+
+#%%
+x_test, id_test = make_test_dataset(df_test)
+test_pred = predict_lgb(
+    x_test, id_test
+)
+
+df_submit = test_pred.rename(columns={'pred': 'TARGET'})
+print(df_submit.shape)
+display(df_submit.head())
+df_submit.to_csv('../output/submission_HyperParameterTuning.csv', index=None)
